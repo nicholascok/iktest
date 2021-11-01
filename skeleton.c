@@ -83,27 +83,29 @@ int ik_chain_solve_fabrik(struct ik_chain* _chain, vec3f _target) {
 		// forward pass
 		target = _chain->nodes[0].pos = _target;
 		
-		for (k = 0; k < _chain->num_nodes - 2; k++) {
-			joint_vec = norm3f(sub3f(target, _chain->nodes[k + 1].pos));
+		for (k = 1; k < _chain->num_nodes - 1; k++) {
+			joint_vec = norm3f(sub3f(target, _chain->nodes[k].pos));
 			
 			// check if joint is within limits
-			cos_phi = dot3f(_chain->nodes[k].rtn, joint_vec);
+			cos_phi = dot3f(_chain->nodes[k - 1].rtn, joint_vec);
 			
-			if (acos(cos_phi) > _chain->nodes[k].aperture) {
-				vec3f axis = norm3f(cross3f(_chain->nodes[k].rtn, joint_vec));
-				qtrn q = make_qrot(axis, _chain->nodes[k].aperture);
-				joint_vec = qrot(q, _chain->nodes[k].rtn);
+			if (acos(cos_phi) > _chain->nodes[k - 1].aperture) {
+				vec3f axis = norm3f(cross3f(_chain->nodes[k - 1].rtn, joint_vec));
+				qtrn q = make_qrot(axis, _chain->nodes[k - 1].aperture);
+				joint_vec = qrot(q, _chain->nodes[k - 1].rtn);
 			}
 			
-			target = sub3f(target, mul3f(joint_vec, _chain->nodes[k + 1].length));
-			_chain->nodes[k + 1].pos = target;
-			_chain->nodes[k + 1].rtn = joint_vec;
+			target = sub3f(target, mul3f(joint_vec, _chain->nodes[k].length));
+			_chain->nodes[k].pos = target;
+			_chain->nodes[k].rtn = joint_vec;
 		}
 		
 		// backward pass
 		target = _chain->nodes[_chain->num_nodes - 1].pos = root;
+		joint_vec = _chain->nodes[_chain->num_nodes - 1].rtn;
 		
 		for (k = _chain->num_nodes - 2; k >= 0; k--) {
+			_chain->nodes[k + 1].rtn = joint_vec;
 			joint_vec = norm3f(sub3f(target, _chain->nodes[k].pos));
 			
 			// check if joint is within limits
@@ -117,7 +119,6 @@ int ik_chain_solve_fabrik(struct ik_chain* _chain, vec3f _target) {
 			
 			target = sub3f(target, mul3f(joint_vec, _chain->nodes[k + 1].length));
 			_chain->nodes[k].pos = target;
-			_chain->nodes[k].rtn = joint_vec;
 		}
 	}
 	
@@ -187,7 +188,7 @@ int main(void) {
 	
 	struct ik_chain n1;
 	vec3f t = {-100.0, 100.0, 0.0};
-	ik_make_chain(&n1, 32760, 1);
+	ik_make_chain(&n1, 100, 5);
 	
 	mouse_event ev;
 	
