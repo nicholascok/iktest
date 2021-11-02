@@ -1,6 +1,10 @@
 #ifndef __INVERSE_KINEMATICS_H__
 #define __INVERSE_KINEMATICS_H__
 
+enum {ERROR_FAILED_ALLOCATE};
+
+#define XERR(MESG, ERRCODE) { perror(MESG"\n"); exit(ERRCODE); }
+
 #include <math.h>
 #include "inc/bcl/bmap.c"
 #include "inc/linalg.h"
@@ -18,6 +22,8 @@ struct ik_node {
 struct ik_chain {
 	struct ik_node* nodes;
 	short num_nodes;
+	double aperture;
+	vec3f rtn;
 };
 
 int ik_draw_chain(struct ik_chain* _chain, int, int);
@@ -69,6 +75,29 @@ int ik_chain_solve_ccd(struct ik_chain* _chain, vec3f _target, double _rigidity)
 	return 0;
 }
 
+/* internal function that clamps a vector to the inside of a cone: the cone's
+ * axis is a vector from its tip to the centre of its base, and the cone's aperture
+ * is the angle between its axis and its edge. (both vectors must be normalised) */
+vec3f __ik_clamp_vector_to_cone(vec3f _cone_axis, double _cone_aperture, vec3f _v) {
+		// we are assuming the provided vectors are normalised so the
+		// cosine of the angle between them is simply their dot product
+		double cos_phi = dot3f(_cone_axis, _v);
+		
+		// if the angle between the cone axis and our vector is greater than
+		// the aperture of the cone then the vector needs to be clamped
+		if (acos(cos_phi) > _cone_aperture) {
+			// rotate the cone's axis to its edge about an axis orthogonal
+			// to both the axis of the cone and the vector we wish to clamp
+			// (with quaternions!)
+			vec3f axis = norm3f(cross3f(_cone_axis, _v));
+			qtrn q = make_qrot(axis, _cone_aperture);
+			return qrot(q, _cone_axis);
+		}
+		
+		// if the vector was not clamped, return it unchanged
+		return _v;
+}
+
 /* solves an inverse kinematics chain for the specified target using
  * the method of forward and backward reaching inverse kinematics (FABRIK). */
 int ik_chain_solve_fabrik(struct ik_chain* _chain, vec3f _target) {
@@ -80,46 +109,62 @@ int ik_chain_solve_fabrik(struct ik_chain* _chain, vec3f _target) {
 	
 	// one hundred FABRIK iterations
 	for (int k, i = 0; i < 1; i++) {
-		// forward pass
+		///////////////////////////////////////////
+		// FORWARD PASS                          //
+		///////////////////////////////////////////
 		target = _chain->nodes[0].pos = _target;
 		
-		for (k = 1; k < _chain->num_nodes - 1; k++) {
-			joint_vec = norm3f(sub3f(target, _chain->nodes[k].pos));
+		// proces sinitial joint
+		joint_vec = norm3f(sub3f(target, _chain->nodes[1].pos));
+		target = sub3f(target, mul3f(joint_vec, _chain->nodes[0].length));
+		_chain->nodes[1].pos = target;
+		_chain->nodes[1].rtn = joint_vec;
+		
+		for (k = 1; k < _chain->num_nodes - 2; k++) {
+			joint_vec = norm3f(sub3f(target, _chain->nodes[k + 1].pos));
 			
-			// check if joint is within limits
-			cos_phi = dot3f(_chain->nodes[k - 1].rtn, joint_vec);
-			
-			if (acos(cos_phi) > _chain->nodes[k - 1].aperture) {
-				vec3f axis = norm3f(cross3f(_chain->nodes[k - 1].rtn, joint_vec));
-				qtrn q = make_qrot(axis, _chain->nodes[k - 1].aperture);
-				joint_vec = qrot(q, _chain->nodes[k - 1].rtn);
-			}
+			// apply angle restrictions
+			joint_vec = __ik_clamp_vector_to_cone(
+				_chain->nodes[k].rtn,
+				_chain->nodes[k].aperture,
+				joint_vec
+			);
 			
 			target = sub3f(target, mul3f(joint_vec, _chain->nodes[k].length));
-			_chain->nodes[k].pos = target;
+			_chain->nodes[k + 1].pos = target;
+			_chain->nodes[k + 1].rtn = joint_vec;
+		}
+		
+		///////////////////////////////////////////
+		// BACKWARD PASS                         //
+		///////////////////////////////////////////
+		target = _chain->nodes[_chain->num_nodes - 1].pos = root;
+		
+		// process initial joint
+		joint_vec = norm3f(sub3f(_chain->nodes[_chain->num_nodes - 2].pos, target));
+		joint_vec = __ik_clamp_vector_to_cone(_chain->rtn, _chain->aperture, joint_vec);
+		target = add3f(target, mul3f(joint_vec, _chain->nodes[_chain->num_nodes - 1].length));
+		_chain->nodes[_chain->num_nodes - 2].pos = target;
+		_chain->nodes[_chain->num_nodes - 1].rtn = joint_vec;
+		
+		// process remaining joints
+		for (k = _chain->num_nodes - 2; k > 0; k--) {
+			joint_vec = norm3f(sub3f(_chain->nodes[k - 1].pos, target));
+			
+			// apply angle restrictions
+			joint_vec = __ik_clamp_vector_to_cone(
+				_chain->nodes[k + 1].rtn,
+				_chain->nodes[k + 1].aperture,
+				joint_vec
+			);
+			
+			target = add3f(target, mul3f(joint_vec, _chain->nodes[k].length));
+			_chain->nodes[k - 1].pos = target;
 			_chain->nodes[k].rtn = joint_vec;
 		}
 		
-		// backward pass
-		target = _chain->nodes[_chain->num_nodes - 1].pos = root;
-		joint_vec = _chain->nodes[_chain->num_nodes - 1].rtn;
-		
-		for (k = _chain->num_nodes - 2; k >= 0; k--) {
-			_chain->nodes[k + 1].rtn = joint_vec;
-			joint_vec = norm3f(sub3f(target, _chain->nodes[k].pos));
-			
-			// check if joint is within limits
-			cos_phi = dot3f(_chain->nodes[k + 1].rtn, joint_vec);
-			
-			if (acos(cos_phi) > _chain->nodes[k + 1].aperture) {
-				vec3f axis = norm3f(cross3f(_chain->nodes[k + 1].rtn, joint_vec));
-				qtrn q = make_qrot(axis, _chain->nodes[k + 1].aperture);
-				joint_vec = qrot(q, _chain->nodes[k + 1].rtn);
-			}
-			
-			target = sub3f(target, mul3f(joint_vec, _chain->nodes[k + 1].length));
-			_chain->nodes[k].pos = target;
-		}
+		// set effector rotation
+		_chain->nodes[0].rtn = _chain->nodes[1].rtn;
 	}
 	
 	return 0;
@@ -127,16 +172,13 @@ int ik_chain_solve_fabrik(struct ik_chain* _chain, vec3f _target) {
 
 int ik_make_chain(struct ik_chain* _chain, short _num_nodes, double _length) {
 	_chain->num_nodes = _num_nodes + 1;
+	_chain->aperture = PI/2;
+	_chain->rtn = (vec3f) {1, 0, 0};
 	
 	_chain->nodes = malloc(_chain->num_nodes * sizeof(struct ik_node));
-	if (!_chain->nodes) return -1;
+	if (!_chain->nodes) XERR("failed to allocate memory!", ERROR_FAILED_ALLOCATE);
 	
-	_chain->nodes[_num_nodes].length = _length;
-	_chain->nodes[_num_nodes].aperture = PI;
-	_chain->nodes[_num_nodes].rtn = (vec3f) {1, 0, 0};
-	_chain->nodes[_num_nodes].pos = (vec3f) {0, 0, 0};
-	
-	for (int i = _num_nodes - 1; i > 0; i--) {
+	for (int i = _num_nodes; i > 0; i--) {
 		_chain->nodes[i].length = _length;
 		_chain->nodes[i].aperture = PI/6;
 		_chain->nodes[i].rtn = (vec3f) {1, 0, 0};
@@ -145,7 +187,7 @@ int ik_make_chain(struct ik_chain* _chain, short _num_nodes, double _length) {
 	}
 	
 	_chain->nodes[0].length = 0;
-	_chain->nodes[0].aperture = PI;
+	_chain->nodes[0].aperture = 0;
 	_chain->nodes[0].rtn = (vec3f) {1, 0, 0};
 	_chain->nodes[0].pos.x = _chain->nodes[1].pos.x + _chain->nodes[1].length;
 	_chain->nodes[0].pos.y = _chain->nodes[0].pos.z = 0;
@@ -172,12 +214,42 @@ int ik_reset_chain(struct ik_chain* _chain) {
 
 int ik_draw_chain(struct ik_chain* _chain, int _x_off, int _y_off) {
 	for (int i = 1; i < _chain->num_nodes; i++) {
-		fb_draw_line((rgbx32) {255, 255, 255, 255}, _chain->nodes[i].pos.x + _x_off, _chain->nodes[i].pos.y + _y_off, _chain->nodes[i - 1].pos.x + _x_off, _chain->nodes[i - 1].pos.y + _y_off);
-		//fb_draw_line((rgbx32) {50, 25, 100, 255}, _chain->nodes[i].pos.x + _x_off, _chain->nodes[i].pos.y + _y_off, _chain->nodes[i].pos.x + _x_off + _chain->nodes[i].rtn.x * 10, _chain->nodes[i].pos.y + _y_off + _chain->nodes[i].rtn.y * 10);
+		// draw bone
+		fb_draw_line(
+			(rgbx32) {255, 255, 255, 255},
+			_chain->nodes[i].pos.x + _x_off,
+			_chain->nodes[i].pos.y + _y_off,
+			_chain->nodes[i - 1].pos.x + _x_off,
+			_chain->nodes[i - 1].pos.y + _y_off
+		);
+		
+		// draw direction
+		fb_draw_line(
+			(rgbx32) {255, 255, 255,255},
+			_chain->nodes[i].pos.x + _x_off,
+			_chain->nodes[i].pos.y + _y_off,
+			_chain->nodes[i - 1].pos.x + _x_off,
+			_chain->nodes[i - 1].pos.y + _y_off
+		);
 	}
 	
-	for (int i = 1; i < _chain->num_nodes; i++)
-		fb_draw_point((rgbx32) {255, 255, 255, 255}, _chain->nodes[i].pos.x + _x_off, _chain->nodes[i].pos.y + _y_off);
+	// draw effector direction
+	fb_draw_line(
+		(rgbx32) {0, 0, 255, 255},
+		_chain->nodes[0].pos.x + _x_off,
+		_chain->nodes[0].pos.y + _y_off,
+		_chain->nodes[0].pos.x + _x_off + _chain->nodes[0].rtn.x * 10,
+		_chain->nodes[0].pos.y + _y_off + _chain->nodes[0].rtn.y * 10
+	);
+	
+	// draw joint points
+	for (int i = 0; i < _chain->num_nodes; i++) {
+		fb_draw_point(
+			(rgbx32) {255, 255, 255, 255},
+			_chain->nodes[i].pos.x + _x_off,
+			_chain->nodes[i].pos.y + _y_off
+		);
+	}
 	
 	return 0;
 }
